@@ -38,6 +38,11 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "")
   .filter(Boolean);
 
 const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_BYTES || 100 * 1024 * 1024);
+// Video needs its own ceiling: it is an order of magnitude larger than a photo, and larger again for
+// course content. Both are deploy-time parameters, so raising a limit is a stack update -- never a code
+// change or a client release.
+const MAX_UPLOAD_BYTES_VIDEO = Number(process.env.MAX_UPLOAD_BYTES_VIDEO || MAX_UPLOAD_BYTES);
+const maxBytesFor = (mediaType) => (String(mediaType).toLowerCase() === "video" ? MAX_UPLOAD_BYTES_VIDEO : MAX_UPLOAD_BYTES);
 const ENABLE_PUT_FALLBACK = true;
 const PRESIGN_TTL_SECS = Number(process.env.PRESIGN_TTL_SECS || 900);
 
@@ -209,6 +214,8 @@ export const handler = async (event) => {
         plan.originalExt
       );
 
+      // Baked into the S3 policy below, so the limit is enforced by S3 rather than trusted from a client.
+      const maxBytes = maxBytesFor(mediaType);
       const post = await createPresignedPost(s3, {
         Bucket: SOURCE_BUCKET,
         Key: sourceKey,
@@ -225,7 +232,7 @@ export const handler = async (event) => {
           "x-amz-meta-custombasepath": md.custombasepath,
         },
         Conditions: [
-          ["content-length-range", 0, MAX_UPLOAD_BYTES],
+          ["content-length-range", 0, maxBytes],
           ["eq", "$key", sourceKey],
           ["eq", "$bucket", SOURCE_BUCKET],
           ["eq", "$Content-Type", mimeForExt(plan.originalExt, contentType)],
@@ -276,6 +283,10 @@ export const handler = async (event) => {
         id,
         fileName,
         status: "pending",
+        // The authoritative limit for THIS upload. Clients validate against it instead of carrying
+        // their own copy, so the number lives in exactly one place: this stack's parameters.
+        maxBytes,
+        mediaType,
         baseKey: finalBaseKey,
         targetBucket,
         cdnBase,
