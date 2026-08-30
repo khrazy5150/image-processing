@@ -1,0 +1,348 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  image-processing-stack v2 — S3 (source) -> EventBridge -> SQS -> Lambda (Sharp) -> S3 (target)
+  + DynamoDB (single item per photo) + upload-init API + inline-bytes upload
+
+Parameters:
+  SourceBucketName:
+    Type: String
+    Default: image-processor-source
+    Description: Base name; actual bucket will be <base>-<AccountId>-<StackName>
+  TargetBucketName:
+    Type: String
+    Default: images.juniorbay.net
+    Description: Existing bucket to write resized images to
+  ImageMetadataTableName:
+    Type: String
+    Default: image_processing_metadata
+    Description: Table for single-item photo records
+  CdnBase:
+    Type: String
+    Default: https://images.juniorbay.net
+    Description: Base URL used to build public image URLs
+  SizesJson:
+    Type: String
+    Default: |
+      [
+        {"name":"full","width":2560,"height":2560,"fit":"inside"},
+        {"name":"large","width":1920,"height":1920,"fit":"inside"},
+        {"name":"medium","width":1080,"height":1080,"fit":"inside"},
+        {"name":"small","width":640,"height":640,"fit":"inside"},
+        {"name":"thumb","width":200,"height":200,"fit":"cover"}
+      ]
+    Description: JSON array of resize specs
+
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Architectures: [x86_64]
+    Timeout: 60
+    MemorySize: 1024
+    Tracing: Active
+
+Resources:
+  ImageProcessingQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 300
+      MessageRetentionPeriod: 345600
+
+  SourceBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${SourceBucketName}-${AWS::AccountId}-${AWS::StackName}'
+      NotificationConfiguration:
+        EventBridgeConfiguration:
+          EventBridgeEnabled: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+
+  # === EventBridge DLQ for the rule target ===
+  EventBridgeDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600   # 14 days
+
+  EventBridgeDLQPolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [!Ref EventBridgeDLQ]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowEventsToDLQ
+            Effect: Allow
+            Principal: { Service: events.amazonaws.com }
+            Action: sqs:SendMessage
+            Resource: !GetAtt EventBridgeDLQ.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !GetAtt S3ObjectCreatedToImageQueue.Arn
+
+  # EventBridge can assume this role to send to the processing queue
+  EventBridgeToImageQueueRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: events.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SendToImageQueue
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt ImageProcessingQueue.Arn
+
+  # Route S3 Object Created events for THIS bucket to the processing queue
+  S3ObjectCreatedToImageQueue:
+    Type: AWS::Events::Rule
+    Properties:
+      EventPattern:
+        source: [aws.s3]
+        detail-type: ["Object Created"]
+        detail:
+          bucket:
+            name:
+              - !Ref SourceBucket   # bucket name created by this stack
+      Targets:
+        - Id: ToImageQueue
+          Arn: !GetAtt ImageProcessingQueue.Arn
+          RoleArn: !GetAtt EventBridgeToImageQueueRole.Arn
+          RetryPolicy:
+            MaximumRetryAttempts: 185               # ~24h with backoff
+            MaximumEventAgeInSeconds: 86400         # 24h
+          DeadLetterConfig:
+            Arn: !GetAtt EventBridgeDLQ.Arn
+
+  PhotosTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Ref ImageMetadataTableName
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: PK,     AttributeType: S }
+        - { AttributeName: SK,     AttributeType: S }
+        - { AttributeName: GSI1PK, AttributeType: S }
+        - { AttributeName: GSI1SK, AttributeType: S }
+        - { AttributeName: GSI2PK, AttributeType: S }
+        - { AttributeName: GSI2SK, AttributeType: S }
+        - { AttributeName: GSI3PK, AttributeType: S }
+        - { AttributeName: GSI3SK, AttributeType: S }
+        - { AttributeName: GSI4PK, AttributeType: S }
+        - { AttributeName: GSI4SK, AttributeType: S }
+      KeySchema:
+        - { AttributeName: PK, KeyType: HASH }
+        - { AttributeName: SK, KeyType: RANGE }
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - { AttributeName: GSI1PK, KeyType: HASH }
+            - { AttributeName: GSI1SK, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+        - IndexName: GSI2
+          KeySchema:
+            - { AttributeName: GSI2PK, KeyType: HASH }
+            - { AttributeName: GSI2SK, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+        - IndexName: GSI3
+          KeySchema:
+            - { AttributeName: GSI3PK, KeyType: HASH }
+            - { AttributeName: GSI3SK, KeyType: RANGE }
+          Projection:
+            ProjectionType: INCLUDE
+            NonKeyAttributes: [ 'id', 'urls', 'color', 'blurHash', 'type' ]
+        - IndexName: GSI4
+          KeySchema:
+            - { AttributeName: GSI4PK, KeyType: HASH }
+            - { AttributeName: GSI4SK, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  ImageProcessorFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildProperties:
+        Target: "node20"
+        Minify: true
+        Bundle: true
+        Sourcemap: false
+        EntryPoints:
+          - imageProcessorApp.js
+        External:
+          - sharp         # keep native sharp in node_modules; built via --use-container
+    Properties:
+      FunctionName: ImageProcessorFunction
+      CodeUri: src/
+      Handler: imageProcessorApp.handler
+      Environment:
+        Variables:
+          PHOTOS_TABLE: !Ref PhotosTable
+          CDN_BASE: !Ref CdnBase
+          PRIMARY_EXT: jpg
+          MULTI_FORMATS: avif,webp,jpg
+          PRESERVE_SOURCE_FOR: png,pdf
+          MAX_TIFF_DIM: 3000
+          WORKER_ID: 1
+          API_BASE: ''
+          WEB_BASE: ''
+          SIZES_JSON: !Ref SizesJson
+          LOG_LEVEL: info
+          TARGET_BUCKET_DEFAULT: !Ref TargetBucketName
+          PUBLIC_READ_ACL: 'false'
+          CACHE_CONTROL: 'public, max-age=31536000, immutable'
+          DISABLE_BLURHASH: 'true'
+          ALLOW_UPSCALE: "1"   # allow upscaling
+          UPSCALE_MAX: "2"     # cap at 2× the original long edge
+      Events:
+        SqsEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt ImageProcessingQueue.Arn
+            BatchSize: 1
+      Policies:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
+        - SQSPollerPolicy:
+            QueueName: !GetAtt ImageProcessingQueue.QueueName
+        - S3ReadPolicy:
+            BucketName: !Ref SourceBucket
+        - S3WritePolicy:
+            BucketName: !Ref TargetBucketName
+        - S3ReadPolicy:
+            BucketName: !Ref TargetBucketName
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PhotosTable
+
+  UploadApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: v3
+
+  CreateUploadFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildProperties:
+        Target: "node20"
+        Minify: true
+        Bundle: true
+        Sourcemap: false
+        EntryPoints:
+          - createUpload.js
+        External:
+          - sharp
+    Properties:
+      Runtime: nodejs20.x
+      CodeUri: src/
+      Handler: createUpload.handler
+      Timeout: 10
+      MemorySize: 256
+      Environment:
+        Variables:
+          SOURCE_BUCKET: !Ref SourceBucket
+          DEFAULT_TARGET_BUCKET: !Ref TargetBucketName
+          DEFAULT_BASE_PREFIX: photos
+          PART_SIZE: 10485760
+          SINGLE_PUT_MAX: 9437184
+      Policies:
+        - S3WritePolicy:
+            BucketName: !Ref SourceBucket
+      Events:
+        CreateUploadRoute:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref UploadApi
+            Path: /upload
+            Method: POST
+
+  CompleteUploadFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildProperties:
+        Target: "node20"
+        Minify: true
+        Bundle: true
+        Sourcemap: false
+        EntryPoints:
+          - createUpload.js
+        External:
+          - sharp
+    Properties:
+      Runtime: nodejs20.x
+      CodeUri: src/
+      Handler: createUpload.complete
+      Timeout: 10
+      MemorySize: 256
+      Environment:
+        Variables:
+          SOURCE_BUCKET: !Ref SourceBucket
+      Policies:
+        - S3WritePolicy:
+            BucketName: !Ref SourceBucket
+      Events:
+        CompleteRoute:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref UploadApi
+            Path: /upload/complete
+            Method: POST
+
+  UploadBytesFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildProperties:
+        Target: "node20"
+        Minify: true
+        Bundle: true
+        Sourcemap: false
+        EntryPoints:
+          - createUpload.js
+        External:
+          - sharp
+    Properties:
+      Runtime: nodejs20.x
+      CodeUri: src/
+      Handler: createUpload.bytes
+      Timeout: 15
+      MemorySize: 512
+      Environment:
+        Variables:
+          SOURCE_BUCKET: !Ref SourceBucket
+          DEFAULT_TARGET_BUCKET: !Ref TargetBucketName
+          DEFAULT_BASE_PREFIX: photos
+          INLINE_UPLOAD_MAX: 6291456   # ~6MB
+          CDN_BASE: !Ref CdnBase
+      Policies:
+        - S3WritePolicy:
+            BucketName: !Ref SourceBucket
+      Events:
+        UploadBytesRoute:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref UploadApi
+            Path: /upload/bytes
+            Method: POST
+
+Outputs:
+  SourceBucketNameOutput:
+    Description: Actual source bucket name created by this stack
+    Value: !Ref SourceBucket
+  QueueUrlOutput:
+    Description: SQS queue URL for image processing
+    Value: !Ref ImageProcessingQueue
+  LambdaFunctionNameOutput:
+    Description: Image processor Lambda function name
+    Value: !Ref ImageProcessorFunction
+  TargetBucketNameOutput:
+    Description: Target bucket receiving resized images
+    Value: !Ref TargetBucketName
+  UploadApiUrl:
+    Description: Base URL for the upload API
+    Value: !Sub 'https://${UploadApi}.execute-api.${AWS::Region}.amazonaws.com/v3'

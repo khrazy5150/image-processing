@@ -1,0 +1,13 @@
+# Dependencies — reinstall with `npm ci` in src/
+node_modules/
+
+# SAM build output
+.aws-sam/
+packaged.yaml
+*.zip
+
+# Local / editor
+.DS_Store
+*.log
+.env
+.env.*

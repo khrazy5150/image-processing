@@ -1,0 +1,10 @@
+version = 0.1
+[default.deploy.parameters]
+stack_name = "image-processing-stack"
+resolve_s3 = true
+s3_prefix = "image-processing-stack"
+region = "us-west-2"
+confirm_changeset = true
+capabilities = "CAPABILITY_IAM"
+parameter_overrides = "SourceBucketName=\"image-processor-source\" TargetBucketName=\"images.juniorbay.net\" ImageMetadataTableName=\"image_processing_metadata\""
+image_repositories = []
