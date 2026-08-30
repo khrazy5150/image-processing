@@ -125,6 +125,9 @@ export const handler = async (event) => {
     const batchBaseKey = body?.baseKey;
     const batchTargetBucket = body?.targetBucket || DEFAULT_TARGET_BUCKET;
     const batchForceFormat = body?.forceFormat || "";
+    // "photo" | "video" -- routes buildPlan to the photos/ or videos/ prefix and picks the primary
+    // extension. Defaults to photo, so existing callers are unaffected.
+    const batchMediaType = String(body?.mediaType || "photo").toLowerCase();
     const batchExcludeId = body?.excludeId === true;
 
     let items = [];
@@ -136,6 +139,7 @@ export const handler = async (event) => {
         baseKey: it?.baseKey || batchBaseKey,
         targetBucket: it?.targetBucket || batchTargetBucket,
         forceFormat: it?.forceFormat || batchForceFormat,
+        mediaType: String(it?.mediaType || batchMediaType).toLowerCase(),
         excludeId: it?.excludeId !== undefined ? it.excludeId : batchExcludeId,
       }));
     } else {
@@ -146,6 +150,7 @@ export const handler = async (event) => {
         baseKey: batchBaseKey,
         targetBucket: batchTargetBucket,
         forceFormat: batchForceFormat,
+        mediaType: batchMediaType,
         excludeId: batchExcludeId,
       }];
     }
@@ -159,6 +164,7 @@ export const handler = async (event) => {
         baseKey: customBaseKey,
         targetBucket,
         forceFormat,
+        mediaType,
         excludeId,
       } = it;
 
@@ -175,7 +181,7 @@ export const handler = async (event) => {
       } else {
         plan = buildPlan({
           id,
-          mediaType: "photo",
+          mediaType,
           basePrefix: basePrefix || DEFAULT_BASE_PREFIX,
           filename: fileName,
           mime: contentType,

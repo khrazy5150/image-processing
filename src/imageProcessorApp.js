@@ -157,7 +157,11 @@ async function processOne(srcBucket, srcKey) {
 
     // Copy original
     const srcExtLower = srcKey.split(".").pop()?.toLowerCase() || "";
-    const preserve = PRESERVE_SOURCE_FOR.includes(srcExtLower);
+    // Non-images are copied through untouched, so their extension must survive: rewriting it to the
+    // (photo) primaryExt stored mp4/webm bytes as original.jpg. PRESERVE_SOURCE_FOR remains for
+    // images we deliberately keep in their source format.
+    const isNonImage = isPDF(contentType, srcKey) || !isImageLike(contentType, srcKey);
+    const preserve = isNonImage || PRESERVE_SOURCE_FOR.includes(srcExtLower);
     const destOriginalKey = `${baseKey}original.${preserve ? srcExtLower : primaryExt}`;
     
     await copyOriginal(srcBucket, srcKey, targetBucket, destOriginalKey, contentType);
@@ -167,7 +171,7 @@ async function processOne(srcBucket, srcKey) {
     const urls = { original: originalUrl };
 
     // Non-image files
-    if (isPDF(contentType, srcKey) || !isImageLike(contentType, srcKey)) {
+    if (isNonImage) {
       await writeVersionRow(id, targetBucket, baseKey, contentType, {
         variants: [],
         urls,
