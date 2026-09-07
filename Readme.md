@@ -63,3 +63,33 @@ The DynamoDB item is keyed by `PK=PHOTO#<id>, SK=PHOTO`.
 - By default the processor saves URLs using `CdnBase` (e.g., `https://images.juniorbay.net`).
 - You can override per-upload behavior by setting S3 object metadata via the upload-init API (already handled).
 - PNG/PDF (and TIFF) originals are preserved; others are normalized to JPG by default.
+
+## Deploying — read this first
+
+`sharp` is a native module: it resolves a platform-specific binary at install time. Building on macOS
+packages `@img/sharp-darwin-x64`, which cannot load on Lambda. Every function here shares `CodeUri: src/`,
+so a bad build takes down uploads, processing AND resizing at once — as happened on 2026-09-06.
+
+Nothing in the normal loop catches it: `sam build` exits 0, and `npm test` passes because the tests
+deliberately avoid loading sharp (a Linux binary will not load on a dev machine, which is exactly why the
+crop geometry lives in `src/lib/crop.js` with no sharp import). The only evidence is inside the package.
+
+```bash
+sam build --use-container --parallel   # resolve deps in the RUNTIME image, not your laptop
+npm run verify:build                   # refuses any package lacking sharp-linux-x64
+sam deploy --no-confirm-changeset
+```
+
+`npm run verify:build` exits 1 and names the offending functions, so it can gate a deploy. Run it between
+build and deploy every time.
+
+If a build has already gone out broken, the symptom is `{"message":"Internal Server Error"}` from API
+Gateway (not the handler's own JSON) and `Could not load the "sharp" module` in the function's logs.
+
+## Tests
+
+```bash
+npm test
+```
+
+Pure geometry only, by design — see above.
