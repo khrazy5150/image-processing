@@ -1,0 +1,9 @@
+{
+  "name": "image-processing-dev",
+  "private": true,
+  "type": "module",
+  "description": "Dev tooling only. The Lambda package is src/ (CodeUri), with its own package.json; nothing here is bundled or deployed.",
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  }
+}

@@ -2,6 +2,8 @@
 import { DynamoDBClient, QueryCommand } from "@aws-sdk/client-dynamodb";
 import { S3Client, GetObjectCommand, HeadObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
 import sharp from "sharp";
+import { createHash } from "node:crypto";
+import { FITS, parseCrop, orientedSize, cropToPixels, transformSuffix } from "./lib/crop.js";
 
 const ddb = new DynamoDBClient({});
 const s3 = new S3Client({});
@@ -51,6 +53,7 @@ function getFormatOptions(fmt) {
   }
 }
 
+
 export const handler = async (event) => {
   const origin = allowedOrigin(event);
 
@@ -86,6 +89,11 @@ export const handler = async (event) => {
     const qs = event?.queryStringParameters || {};
     const requestedFormat = (qs.format || "").toLowerCase();
     const fit = qs.fit || "inside";
+    if (!FITS.has(fit))
+      return json(400, { error: "Invalid fit", message: `Supported: ${[...FITS].join(", ")}` }, origin);
+
+    const crop = parseCrop(qs.crop);
+    if (crop?.error) return json(400, { error: "Invalid crop", message: crop.error }, origin);
 
     let formats;
     if (requestedFormat) {
@@ -127,24 +135,37 @@ export const handler = async (event) => {
     const getRes = await s3.send(new GetObjectCommand({ Bucket: SOURCE_BUCKET, Key: foundSourceKey }));
     const srcBuf = await streamToBuffer(getRes.Body);
 
+    let cropPixels = null;
+    if (crop) {
+      const metadata = await sharp(srcBuf, { failOn: "none" }).metadata();
+      const source = orientedSize(metadata);
+      if (!source.width || !source.height)
+        return json(422, { error: "Unreadable source", message: "Could not read source dimensions" }, origin);
+      cropPixels = cropToPixels(crop, source);
+    }
+    const suffix = transformSuffix(fit, cropPixels, createHash);
+
     const results = [];
     const urls = {};
 
     for (const format of formats) {
       const sharpFmt = format === "jpg" ? "jpeg" : format;
-      const { data, info } = await sharp(srcBuf, { failOn: "none" })
-        .rotate()
+      let pipeline = sharp(srcBuf, { failOn: "none" }).rotate();
+      // extract AFTER rotate: the rect is in displayed (post-EXIF) coordinates.
+      if (cropPixels) pipeline = pipeline.extract(cropPixels);
+      const { data, info } = await pipeline
         .resize({ width, height, fit, withoutEnlargement: false, kernel: sharp.kernel.lanczos3 })
         .toFormat(sharpFmt, getFormatOptions(format))
         .toBuffer({ resolveWithObject: true });
 
-      const destKey = `${baseKey}custom_${width}x${height}.${format}`;
+      const destKey = `${baseKey}custom_${width}x${height}_${suffix}.${format}`;
       await s3.send(new PutObjectCommand({
         Bucket: targetBucket, Key: destKey, Body: data,
         ContentType: MIME[format] || "image/jpeg",
         CacheControl: CACHE_CONTROL,
         Metadata: { id, basekey: baseKey, custom: "true", dimensions: `${width}x${height}`, fit,
           width: String(info.width), height: String(info.height),
+          ...(cropPixels ? { crop: `${cropPixels.left},${cropPixels.top},${cropPixels.width},${cropPixels.height}` } : {}),
         },
       }));
 
@@ -153,7 +174,7 @@ export const handler = async (event) => {
       urls[format] = url;
     }
 
-    return json(200, { id, dimensions: `${width}x${height}`, fit, formats: results.map(r=>r.format), urls, variants: results }, origin);
+    return json(200, { id, dimensions: `${width}x${height}`, fit, crop: cropPixels, formats: results.map(r=>r.format), urls, variants: results }, origin);
 
   } catch (err) {
     console.error("onDemandResize error:", err);
