@@ -39,20 +39,21 @@ const PRESERVE_SOURCE_FOR = (process.env.PRESERVE_SOURCE_FOR || "png,pdf,tiff")
 
 const MAX_TIFF_DIM = Number(process.env.MAX_TIFF_DIM || 3000);
 
-const DEFAULT_SIZES = [
+const SIZES = [
   { name: "thumb",  width:  200, height:  200, fit: "cover"  },
-  { name: "small",  width:  640, height:  640, fit: "inside" },
+  // 800, not 640. A phone at 412 CSS px and DPR 1.75 needs ~721 physical px, so with a 640 rung it skipped
+  // straight to 1080 and downloaded a 1080px file for a 412px viewport. 800 covers that case; 1080 stays in
+  // the ladder so a DPR-1 desktop at ~832px still lands on it rather than jumping to 1920.
+  //
+  // Widening the EXISTING rung rather than inserting a new one is deliberate: a new filename 404s for every
+  // asset not yet reprocessed, and browsers do not fall back within a srcset -- those images would simply
+  // break. This way an un-reprocessed asset is a 640px file labelled 800w: slightly soft, never broken.
+  { name: "small",  width:  800, height:  800, fit: "inside" },
   { name: "medium", width: 1080, height: 1080, fit: "inside" },
   { name: "large",  width: 1920, height: 1920, fit: "inside" },
   { name: "full",   width: 2560, height: 2560, fit: "inside" },
 ];
 
-let SIZES;
-try { 
-  SIZES = JSON.parse(process.env.SIZES_JSON || "[]"); 
-  if (!Array.isArray(SIZES) || !SIZES.length) SIZES = DEFAULT_SIZES; 
-}
-catch { SIZES = DEFAULT_SIZES; }
 
 const log = (...a) => console.log(...a);
 const warn = (...a) => console.warn(...a);
@@ -346,7 +347,13 @@ function getOptimizedFormatOptions(fmt, sizeName) {
       };
     case "webp": 
       return { 
-        quality: isLarge ? 80 : 85, 
+        // 78, not 85. Measured on real landing-page photos: q=85 produced 113-220 KB per megapixel where a
+        // tuned photographic webp sits near 60-100, and dropping to 78 cut the two heaviest images on a live
+        // page by ~25% with no visible difference at display size.
+        //
+        // `effort` stays at 2 deliberately: raising it to 6 was measured too and returned ~2% for 4x the
+        // encode time (0.11s -> 0.43s per image). The quality knob is where the bytes are.
+        quality: isLarge ? 75 : 78, 
         effort: 2  // Reduced from 4 for faster processing
       };
     case "avif": 

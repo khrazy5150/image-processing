@@ -1,4 +1,5 @@
 version = 0.1
+
 [default.deploy.parameters]
 stack_name = "image-processing-stack"
 resolve_s3 = true
@@ -6,5 +7,14 @@ s3_prefix = "image-processing-stack"
 region = "us-west-2"
 confirm_changeset = true
 capabilities = "CAPABILITY_IAM"
-parameter_overrides = "SourceBucketName=\"image-processor-source\" TargetBucketName=\"images.juniorbay.net\" ImageMetadataTableName=\"image_processing_metadata\""
+# The rendition ladder is NOT here. It lives in src/imageProcessorApp.js as the single source of truth.
+# It used to be a SizesJson parameter, which failed twice on 2026-09-08: a template Default is ignored once a
+# stack has a stored value, and SAM's parameter_overrides cannot carry JSON in either the string or the array
+# form (it mangled the value down to `[{`). Keep it in code, guarded by
+# stripe-link/tests/test_rendition_ladder.py.
+parameter_overrides = [
+    "SourceBucketName=image-processor-source",
+    "TargetBucketName=images.juniorbay.net",
+    "ImageMetadataTableName=image_processing_metadata",
+]
 image_repositories = []

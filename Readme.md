@@ -86,6 +86,42 @@ build and deploy every time.
 If a build has already gone out broken, the symptom is `{"message":"Internal Server Error"}` from API
 Gateway (not the handler's own JSON) and `Could not load the "sharp" module` in the function's logs.
 
+## Reprocessing an image is only half the job
+
+Derivatives are served `cache-control: public, max-age=31536000, immutable`. Reprocessing rewrites the S3
+object, but CloudFront keeps handing out the old bytes for up to a year — `immutable` tells it never to
+revalidate. **Reprocessing without invalidating is invisible.**
+
+```bash
+API=https://dph4d1c6p8.execute-api.us-west-2.amazonaws.com/v3
+curl -s -X POST "$API/reprocess/{imageId}" -H 'content-type: application/json' -d '{}'
+
+# WAIT for the queue to drain, then confirm S3 differs from the CDN copy before invalidating —
+# flushing too early just re-caches the old file and you have to do it twice.
+aws s3api head-object --bucket images.juniorbay.net --key offers/{imageId}/medium.webp --query ContentLength
+curl -sI https://images.juniorbay.com/offers/{imageId}/medium.webp | grep -i content-length
+
+aws cloudfront create-invalidation --distribution-id E16GIH1C3GYFQE --paths '/offers/*'
+```
+
+One wildcard path stays inside the free 1,000-a-month tier; listing files individually does not.
+
+**Verify dimensions, not status codes.** A `200` from `/reprocess` means "queued", not "produced what you
+expected". On 2026-09-08 a ladder change appeared to deploy fine and every reprocess returned 200, while the
+files came back at the old size — only measuring the actual pixel dimensions revealed it.
+
+## The size ladder lives in code
+
+`SIZES` in `src/imageProcessorApp.js` is the single source of truth. It briefly also existed as a `SizesJson`
+CloudFormation parameter; that failed twice in one day. A template `Default` is ignored once a stack holds a
+stored value for that parameter, and SAM's `parameter_overrides` cannot carry JSON in either the string or
+the array form — it mangled the value to `[{`, after which the ladder worked only because parsing threw and
+the code fell back to its constant. Changing the ladder means changing that array and deploying.
+
+It must stay in step with `IMAGE_RENDITION_WIDTHS` in `stripe-link` — those numbers become the `w`
+descriptors in every `srcset`. `stripe-link/tests/test_rendition_ladder.py` reads this file and fails on
+drift, and also fails if a `SIZES_JSON` override reappears.
+
 ## Tests
 
 ```bash
