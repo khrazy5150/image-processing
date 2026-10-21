@@ -5,6 +5,14 @@ Description: >
   status endpoint, and complete URL tracking
 
 Parameters:
+  CdnDistributionId:
+    Type: String
+    Default: E16GIH1C3GYFQE
+    Description: >
+      The CloudFront distribution serving images.juniorbay.com / .net. Deleting an object from S3 does
+      not stop an edge serving its cached copy, and variants are sent with max-age=31536000 immutable,
+      so a delete without an invalidation leaves the image public for up to a year — and only for the
+      images someone actually loaded, which are exactly the ones worth taking down.
   SourceBucketName:
     Type: String
     Default: image-processor-source
@@ -470,6 +478,10 @@ Resources:
           SOURCE_BUCKET: !Ref SourceBucket
           TARGET_BUCKET_DEFAULT: !Ref TargetBucketName
           ALLOWED_ORIGINS: "http://127.0.0.1:5500,http://localhost:5500,https://images.juniorbay.net,https://images.juniorbay.com,https://juniorbay.com,https://www.juniorbay.com"
+          # The images.juniorbay.com distribution, which is console-managed rather than defined here --
+          # hence an id rather than a !Ref. Deleting from S3 does not stop an edge serving a cached
+          # copy, and the variants carry max-age=31536000, so without this a takedown is not one.
+          CDN_DISTRIBUTION_ID: !Ref CdnDistributionId
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref PhotosTable
@@ -477,6 +489,12 @@ Resources:
             BucketName: !Ref SourceBucket
         - S3CrudPolicy:
             BucketName: !Ref TargetBucketName
+        # Invalidation only. Not a CloudFront full-access policy: this function needs to purge paths,
+        # never to reconfigure or delete the distribution that serves every image on the platform.
+        - Statement:
+            Effect: Allow
+            Action: cloudfront:CreateInvalidation
+            Resource: !Sub "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${CdnDistributionId}"
       Events:
         DeleteRoute:
           Type: HttpApi

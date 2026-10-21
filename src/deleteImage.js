@@ -1,13 +1,22 @@
 // src/deleteImage.js
 import { DynamoDBClient, QueryCommand, DeleteItemCommand } from "@aws-sdk/client-dynamodb";
 import { S3Client, ListObjectsV2Command, DeleteObjectsCommand } from "@aws-sdk/client-s3";
+import { CloudFrontClient, CreateInvalidationCommand } from "@aws-sdk/client-cloudfront";
 
 const ddb = new DynamoDBClient({});
 const s3 = new S3Client({});
+const cloudfront = new CloudFrontClient({});
 
 const METADATA_TABLE = process.env.PHOTOS_TABLE || process.env.IMAGE_METADATA_TABLE_NAME || "";
 const SOURCE_BUCKET = process.env.SOURCE_BUCKET || "";
 const TARGET_BUCKET_DEFAULT = process.env.TARGET_BUCKET_DEFAULT || "images.juniorbay.net";
+// WITHOUT THIS, DELETING AN IMAGE DOES NOT TAKE IT DOWN. Variants are served with
+// `cache-control: public, max-age=31536000, immutable`, which is correct for content-addressed URLs
+// and means an edge keeps serving a deleted object for up to a YEAR. Worse, the only objects that are
+// cached are the ones somebody actually loaded -- so deletion appeared to work for every image nobody
+// had looked at, and silently failed for every image that was live on a page. Measured 2026-10-20:
+// origin 403, edge 200 from cache, age 47s, on an object deleted a minute earlier.
+const CDN_DISTRIBUTION_ID = process.env.CDN_DISTRIBUTION_ID || "";
 
 const json = (code, obj, origin = "*") => ({
   statusCode: code,
@@ -126,12 +135,42 @@ export const handler = async (event) => {
       }));
     }
 
+    // 4) drop it from the CDN. The bytes are already gone; this is what makes it UNREACHABLE.
+    //    Failure here does not fail the delete -- the objects really are deleted and the caller must
+    //    not be told otherwise -- but it is REPORTED rather than swallowed, because the difference
+    //    between "deleted" and "deleted and no longer being served" is the entire point of a takedown.
+    let cdnInvalidated = false;
+    let cdnError = "";
+    if (CDN_DISTRIBUTION_ID) {
+      try {
+        await cloudfront.send(new CreateInvalidationCommand({
+          DistributionId: CDN_DISTRIBUTION_ID,
+          InvalidationBatch: {
+            // One wildcard covers every variant and format of this image: thumb/small/medium/large/
+            // full across avif/webp/jpg plus the original. Listing them individually would be a dozen
+            // paths against the 1000-a-month free allowance, and would miss any variant added later.
+            Paths: { Quantity: 1, Items: [`/${baseKey}*`] },
+            CallerReference: `delete-${id}-${Date.now()}`,
+          },
+        }));
+        cdnInvalidated = true;
+      } catch (e) {
+        console.error("CDN invalidation failed; image is deleted but may still be served:", e);
+        cdnError = String(e?.message || e);
+      }
+    } else {
+      cdnError = "CDN_DISTRIBUTION_ID is not configured";
+    }
+
     return json(200, {
       success: true,
       id, baseKey, bucket,
       deletedCount: objectsToDelete.length,
       sourceDeleted,
-      message: `Deleted image ${id}${sourceDeleted ? " (including original)" : ""}`,
+      cdnInvalidated,
+      ...(cdnError ? { cdnError } : {}),
+      message: `Deleted image ${id}${sourceDeleted ? " (including original)" : ""}`
+        + (cdnInvalidated ? "" : " — NOT yet purged from the CDN"),
     }, origin);
 
   } catch (err) {
