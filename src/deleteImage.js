@@ -1,11 +1,9 @@
 // src/deleteImage.js
 import { DynamoDBClient, QueryCommand, DeleteItemCommand } from "@aws-sdk/client-dynamodb";
 import { S3Client, ListObjectsV2Command, DeleteObjectsCommand } from "@aws-sdk/client-s3";
-import { CloudFrontClient, CreateInvalidationCommand } from "@aws-sdk/client-cloudfront";
 
 const ddb = new DynamoDBClient({});
 const s3 = new S3Client({});
-const cloudfront = new CloudFrontClient({});
 
 const METADATA_TABLE = process.env.PHOTOS_TABLE || process.env.IMAGE_METADATA_TABLE_NAME || "";
 const SOURCE_BUCKET = process.env.SOURCE_BUCKET || "";
@@ -143,6 +141,12 @@ export const handler = async (event) => {
     let cdnError = "";
     if (CDN_DISTRIBUTION_ID) {
       try {
+        // IMPORTED LAZILY, and that is deliberate. The other clients here come from the Node 20
+        // runtime's bundled SDK v3 rather than from node_modules, and whether CloudFront is in that
+        // bundle is not something to find out by breaking every delete on the platform. A module that
+        // will not resolve lands in the same catch as an API error: reported, never fatal.
+        const { CloudFrontClient, CreateInvalidationCommand } = await import("@aws-sdk/client-cloudfront");
+        const cloudfront = new CloudFrontClient({});
         await cloudfront.send(new CreateInvalidationCommand({
           DistributionId: CDN_DISTRIBUTION_ID,
           InvalidationBatch: {

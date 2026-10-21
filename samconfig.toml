@@ -16,5 +16,9 @@ parameter_overrides = [
     "SourceBucketName=image-processor-source",
     "TargetBucketName=images.juniorbay.net",
     "ImageMetadataTableName=image_processing_metadata",
+    # EXPLICIT, not left to the template Default. This file already records why: "a template Default is
+    # ignored once a stack has a stored value". It is a new parameter today, so the Default would work --
+    # and would quietly stop working the first time anyone changed it here.
+    "CdnDistributionId=E16GIH1C3GYFQE",
 ]
 image_repositories = []
