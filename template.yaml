@@ -36,10 +36,17 @@ Parameters:
       content-length-range condition, and reported to clients as maxBytes so they can fail fast.
   MaxVideoUploadBytes:
     Type: Number
-    Default: 524288000
-    Description: Max bytes for a video upload (mediaType=video). Separate from MaxUploadBytes because
-      video is far larger than a photo and will grow again for course content. Raise this at deploy
-      time -- no code change, no client release.
+    Default: 5368709120
+    # 5 GiB is the CEILING THIS ARCHITECTURE SUPPORTS, not a policy choice. Two independent S3 limits sit
+    # at exactly 5 GB, and a larger number here would hand a client a presign that cannot succeed:
+    #   1. uploadMultiple mints a presigned POST, and a single POST/PUT cannot create an object over 5 GB.
+    #   2. imageProcessorApp.copyOriginal uses one CopyObjectCommand, whose server-side copy caps at 5 GB.
+    # Going above this means multipart upload on the client and UploadPartCopy in the processor -- see
+    # stripe-link/plans/VIDEO_TRANSCODE.md, which has to solve delivery anyway and is the right place.
+    Description: >-
+      Max bytes for a video upload (mediaType=video). Separate from MaxUploadBytes because video is far
+      larger than a photo. 5 GiB is the architectural ceiling, not a dial - a larger value only mints
+      presigns S3 will refuse. Raise this at deploy time; no code change, no client release.
 
 Globals:
   Function:
@@ -214,6 +221,11 @@ Resources:
       FunctionName: ImageProcessorFunction
       CodeUri: src/
       Handler: imageProcessorApp.handler
+      # Overrides the 60s in Globals. `copyOriginal` is ONE synchronous CopyObject, and the Lambda
+      # blocks on it; at the 5 GiB ceiling that copy does not reliably finish inside a minute, and the
+      # timeout would surface as a video that uploads fine and then never gets a url. 300s is what the
+      # queue's VisibilityTimeout and the dashboard's pollVideoUrl deadline already assume.
+      Timeout: 300
       Environment:
         Variables:
           PHOTOS_TABLE: !Ref PhotosTable

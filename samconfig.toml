@@ -20,5 +20,10 @@ parameter_overrides = [
     # ignored once a stack has a stored value". It is a new parameter today, so the Default would work --
     # and would quietly stop working the first time anyone changed it here.
     "CdnDistributionId=E16GIH1C3GYFQE",
+    # EXPLICIT for the reason stated just above, which applies here with teeth: this stack ALREADY has a
+    # stored value of 524288000 from when the parameter was created, so raising the template Default on
+    # its own changes nothing. 5 GiB is the architectural ceiling (see the parameter's Description) --
+    # anything larger mints a presign S3 will refuse.
+    "MaxVideoUploadBytes=5368709120",
 ]
 image_repositories = []
